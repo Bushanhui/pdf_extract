@@ -14,7 +14,7 @@ import logging
 import glob
 from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from dotenv import load_dotenv
@@ -87,8 +87,10 @@ class PDFToCorpusConverter:
             self.api_keys.append(legacy_backup)
         
         # API 키 상태 관리
-        self.current_key_index = 0
-        self.current_api_key = self.api_keys[0] if self.api_keys else None
+        self.usage_file = "api_key_usage.json"
+        self._load_key_usage()  # JSON에서 키 상태 로드
+        self.current_key_index = self._get_available_key_index()
+        self.current_api_key = self.api_keys[self.current_key_index] if self.api_keys else None
         
         if not self.api_keys:
             raise ValueError(
@@ -120,7 +122,11 @@ class PDFToCorpusConverter:
         logger.info(f"✅ 설정된 API 키 개수: {len(self.api_keys)}개")
         for i, key in enumerate(self.api_keys):
             key_type = "메인" if i == 0 else f"백업{i}"
-            logger.info(f"  {key_type} API 키: ***...{key[-4:]}")
+            key_id = f"***{key[-4:]}"
+            key_info = self.key_usage.get(key_id, {'status': 'available'})
+            status_emoji = "🟢" if key_info['status'] == 'available' else "🔴" if key_info['status'] == 'exhausted' else "🟡"
+            current_mark = " ←현재선택" if i == self.current_key_index else ""
+            logger.info(f"  {key_type} API 키: {key_id} {status_emoji}{key_info['status']}{current_mark}")
         
         if len(self.api_keys) == 1:
             logger.warning(f"⚠️  백업 API 키가 없습니다. GOOGLE_API_KEY_BACKUP_1, GOOGLE_API_KEY_BACKUP_2 등 환경변수 설정을 권장합니다.")
@@ -1465,6 +1471,121 @@ class PDFToCorpusConverter:
         ]
         return any(keyword in error_str for keyword in auth_keywords)
     
+    def _load_key_usage(self) -> None:
+        """
+        JSON 파일에서 API 키 사용 상태를 로드하고 24시간 경과 키는 자동으로 리셋합니다.
+        """
+        try:
+            if not Path(self.usage_file).exists():
+                # 파일이 없으면 모든 키를 available 상태로 초기화
+                self.key_usage = self._initialize_key_usage()
+                self._save_key_usage()
+                logger.info(f"📝 API 키 사용량 추적 파일 생성: {self.usage_file}")
+                return
+            
+            with open(self.usage_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                self.key_usage = data.get('keys', {})
+            
+            # 24시간 경과 키들을 자동으로 available로 리셋
+            current_time = datetime.now()
+            reset_count = 0
+            
+            for key_id, key_info in self.key_usage.items():
+                if key_info.get('reset_time'):
+                    reset_time = datetime.fromisoformat(key_info['reset_time'])
+                    if current_time >= reset_time and key_info['status'] == 'exhausted':
+                        key_info['status'] = 'available'
+                        key_info['first_used'] = None
+                        key_info['reset_time'] = None
+                        reset_count += 1
+            
+            if reset_count > 0:
+                logger.info(f"🔄 {reset_count}개 API 키가 24시간 경과로 사용 가능 상태로 리셋됨")
+                self._save_key_usage()
+            
+            logger.info(f"✅ API 키 사용량 상태 로드 완료: {len(self.key_usage)}개 키")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ API 키 사용량 로드 실패, 초기화합니다: {e}")
+            self.key_usage = self._initialize_key_usage()
+            self._save_key_usage()
+    
+    def _initialize_key_usage(self) -> Dict[str, Dict[str, Any]]:
+        """
+        모든 API 키를 사용 가능 상태로 초기화합니다.
+        """
+        usage = {}
+        for api_key in self.api_keys:
+            key_id = f"***{api_key[-4:]}"  # 마지막 4자리로 식별
+            usage[key_id] = {
+                'first_used': None,
+                'status': 'available',  # available, active, exhausted
+                'reset_time': None
+            }
+        return usage
+    
+    def _save_key_usage(self) -> None:
+        """
+        현재 API 키 사용 상태를 JSON 파일에 저장합니다.
+        """
+        try:
+            data = {
+                'keys': self.key_usage,
+                'last_updated': datetime.now().isoformat()
+            }
+            
+            with open(self.usage_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                
+        except Exception as e:
+            logger.warning(f"⚠️ API 키 사용량 저장 실패: {e}")
+    
+    def _get_available_key_index(self) -> int:
+        """
+        사용 가능한 첫 번째 API 키의 인덱스를 반환합니다.
+        
+        우선순위: available 상태 키 > 24시간 경과 키 > 첫 번째 키 (기본값)
+        """
+        for i, api_key in enumerate(self.api_keys):
+            key_id = f"***{api_key[-4:]}"
+            key_info = self.key_usage.get(key_id, {'status': 'available'})
+            
+            if key_info['status'] == 'available':
+                logger.info(f"🔑 사용 가능한 API 키 선택: {key_id} (인덱스 {i})")
+                return i
+        
+        # 사용 가능한 키가 없으면 첫 번째 키 사용 (기본 동작)
+        logger.warning(f"⚠️ 사용 가능한 키가 없어 메인 키부터 시작합니다")
+        return 0
+    
+    def _mark_key_exhausted(self, key_index: int) -> None:
+        """
+        지정된 키를 할당량 소진 상태로 마킹하고 24시간 후 리셋 시간을 설정합니다.
+        """
+        if key_index >= len(self.api_keys):
+            return
+            
+        api_key = self.api_keys[key_index]
+        key_id = f"***{api_key[-4:]}"
+        current_time = datetime.now()
+        
+        if key_id not in self.key_usage:
+            self.key_usage[key_id] = {'first_used': None, 'status': 'available', 'reset_time': None}
+        
+        # 첫 사용인 경우 시작 시간 기록
+        if not self.key_usage[key_id]['first_used']:
+            self.key_usage[key_id]['first_used'] = current_time.isoformat()
+        
+        # 상태를 exhausted로 변경하고 24시간 후 리셋 시간 설정
+        self.key_usage[key_id]['status'] = 'exhausted'
+        self.key_usage[key_id]['reset_time'] = (current_time + timedelta(hours=24)).isoformat()
+        
+        self._save_key_usage()
+        
+        reset_time_str = (current_time + timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
+        logger.warning(f"⏰ API 키 {key_id} 할당량 소진으로 마킹, 리셋 시간: {reset_time_str}")
+    
     def _switch_to_next_key(self) -> bool:
         """
         다음 API 키로 전환합니다.
@@ -1472,6 +1593,9 @@ class PDFToCorpusConverter:
         Returns:
             bool: 전환 성공 시 True, 더 이상 사용할 키가 없으면 False
         """
+        # 현재 키를 할당량 소진 상태로 마킹
+        self._mark_key_exhausted(self.current_key_index)
+        
         if self.current_key_index < len(self.api_keys) - 1:
             self.current_key_index += 1
             self.current_api_key = self.api_keys[self.current_key_index]
