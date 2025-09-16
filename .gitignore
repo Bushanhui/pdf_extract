@@ -45,3 +45,6 @@ Thumbs.db
 
 # API key usage tracking file (will be created by the app)
 api_key_usage.json
+
+# Development/experimental prompt files
+prompt_퍼플.py

@@ -38,9 +38,9 @@ class PDFSplitter:
             raise Exception(f"PDF 페이지 수 조회 실패: {e}")
     
     def split_pdf_into_batches(
-        self, 
-        pdf_path: str, 
-        batch_size: int = 50,
+        self,
+        pdf_path: str,
+        batch_size: int = 10,
         session_id: str = None
     ) -> List[Dict[str, Any]]:
         """

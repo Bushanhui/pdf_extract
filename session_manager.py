@@ -23,10 +23,10 @@ class SessionManager:
         self.json_backup = JSONBackupManager()
     
     def create_batch_session(
-        self, 
-        pdf_path: str, 
-        language: str, 
-        batch_size: int = 50
+        self,
+        pdf_path: str,
+        language: str,
+        batch_size: int = 10
     ) -> Dict[str, Any]:
         """
         새로운 배치 처리 세션을 생성합니다.

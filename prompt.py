@@ -6,7 +6,7 @@ PDF 텍스트 추출을 위한 프롬프트 관리 모듈
 
 from typing import Optional
 
-# 0912 버전
+# 0915 버전 - euaa
 def get_korean_extraction_prompt() -> str:
     """PDF에서 텍스트를 추출하는 프롬프트"""
     return """
@@ -27,14 +27,12 @@ def get_korean_extraction_prompt() -> str:
       7) 문장 안에 따옴표로 묶인 문장이 있는 경우: 따옴표 안의 문장은 종속된 문장입니다. 절대로 별도의 문장으로 분리하지 마세요. 따옴표로 묶인 인용문이 포함된 문장 전체를 하나의 완성된 문장으로 추출하세요.
 
     (2) 제외 사항
-      1) 매 페이지마다 반복되는 페이지 번호는 제외해주세요.(예: Page 6 of 67, 15/63)
-			2) 오른쪽 정렬이 된 "목차로 돌아가기"는 추출하지 마세요.
-      3) 모든 윗첨자 문자는 무시하세요:
+      1) 페이지 번호, 매 페이지마다 반복되는 머리글은 제외해주세요.(보통 머리글에는 보고서 작성 기관명, 부제목, 소제목 등의 제목이 있습니다.)
+			2) 모든 윗첨자 문자는 무시하세요:
         - 윗첨자(예: ¹, ², ³)로 서식이 지정된 모든 텍스트는 추출된 문장에서 **완전히 생략**되어야 합니다.
         - 이러한 문자들을 1, 2와 같은 **일반적인 숫자나 목록 항목으로 변환해서는 절대 안 됩니다.** 단순히 폐기하세요.
-        - 이 규칙은 각주 표시, 참조 번호 및 기타 모든 첨자 사용에 적용됩니다.
+        - **각주 표시에 있는 첨자는 제거하지 마세요.**
         - 넘버링 문자와 혼동하면 안 됩니다. **넘버링 문자는 제거하지 마세요.** 예: "(1)", "1)", "1." 등은 제거하지 마세요.
-      4) 각주 표시는 제외해주세요. (예: ¹ World Population Review, India Population 2021, nd)
 			
     (3) 포함 사항
       1) 다음 내용은 포함해주세요:
@@ -43,7 +41,8 @@ def get_korean_extraction_prompt() -> str:
         - 목록 항목과 글머리 기호(예: "•", "o", "-", "(i)", "a." 등)
           * 예시: "- 광석운반선", "• 겸용선", "(1) 검사 시 안전을 위하여 필요한 설비를 제공하여야 한다."
       2) **문장에 수식, 특수문자, 숫자, 기호, 외국어가 포함되어 있어도 원문 그대로 추출해주세요.**
-      3) 표 안에 있는 텍스트도 추출해주세요.
+      3) 표나 이미지 안에 있는 텍스트도 추출해주세요.
+      4) 각주의 내용도 추출해주세요.
 
     (4) 수정 금지 사항
       1) 원본 파일의 텍스트를 임의로 수정하지 마세요.
@@ -58,7 +57,7 @@ def get_korean_extraction_prompt() -> str:
       "sentences": [
         {
           "text": "추출된 문장",
-          "source_type": "table|text"
+          "source_type": "table|text|image|footnote"
         }
       ]
     }
@@ -74,8 +73,16 @@ def get_korean_extraction_prompt() -> str:
           "source_type": "text"
         },
         {
+          "text": "그림 1. 활동의 예",
+          "source_type": "image"
+        },
+        {
           "text": "(비고) 1) 상기 규정은 모든 선박에 적용된다.",
           "source_type": "table"
+        },
+        {
+          "text": "²¹ 입국거부 사유에 대한 자세한 내용은 'EASO의 Practical Guide: Exclusion' , January 2017; 및 'EASO, Practical Guide on Exclusion for Serious (Non-political) Crimes, December 2021’ 참조",
+          "source_type": "footnote"
         }
       ]
     }
@@ -92,17 +99,26 @@ def get_korean_extraction_prompt() -> str:
        - 문단, 제목, 목록 등 일반적인 문서 본문
        - 표나 이미지에 속하지 않는 모든 텍스트
        - 주의: 본문 영역에서 언급되는 '표 10 : ...'처럼, 뒤에 표가 없으나 표를 단순 언급하는 경우는 'text'로 분류
+
+      3) "image": 이미지, 도표, 그림, 차트 내의 텍스트  
+       - 이미지 파일이나 그래픽 요소 안에 포함된 텍스트
+       - 도표, 차트, 플로우차트 내의 라벨과 텍스트
+       - 이미지의 제목도 'image'로 분류(예: "그림 7. ...")
+      
+      4) "footnote": 각주 관련 모든 텍스트
+       - 각주의 내용
     
     (2) 출처 분류 시 주의사항
     - 각 문장마다 반드시 적절한 source_type을 지정해주세요
     - 애매한 경우 가장 직접적인 출처를 기준으로 분류하세요
 
     3. 중요 사항 강조
-      1) 페이지 안에 있는 어떠한 문단이나, 문장, 표 안의 텍스트도 절대 빠짐없이 추출해주세요. (예: '3.8.1' 넘버링 문단은 출력하고 '3.8.2' 넘버링 문단을 빠뜨리면 오답입니다.)
+      1) 파일 안에 있는 모든 페이지의 문단이나, 문장, 표 안의 텍스트도 절대 빠짐없이 추출해주세요. (예: '3.8.1' 넘버링 문단은 출력하고 '3.8.2' 넘버링 문단을 빠뜨리면 오답입니다.)
       2) 유사한 구조의 다른 단락과 혼동하지 말고, 무조건 순서대로 원문 그대로 추출해주세요.
-      3) 넘버링은 무조건 출력하세요. 한국어-영어 병렬 코퍼스 생성에 매우 중요합니다.
-      4) 넘버링이나 표의 제목에 있는 넘버링을 유의하여 순차적으로 빠뜨린 것이 없이 꼼꼼하게 추출되도록 해주세요.
+      3) 넘버링 보존 규칙: 원본의 모든 넘버링(예: "1.1", "a)" 등)은 텍스트 정렬에 매우 중요하므로, **형식, 순서, 위치를 절대 변경하거나 생략하지 말고 원문 그대로 추출**해야 합니다.
+      4) 문장의 넘버링이나 표의 제목에 있는 넘버링을 유의하여 순차적으로 빠뜨린 것이 없이 꼼꼼하게 추출되도록 해주세요.
       5) **JSON 객체 분리 원칙: `sentences` 배열의 각 `{}` 객체는 반드시 하나의 문장만을 가져야 합니다. 여러 문장을 하나의 객체에 합치지 마세요.**
+      6) 페이지 경계 처리: 한 문장이 페이지 끝에서 나뉘어 다음 페이지로 이어질 경우, 그 사이에 있는 각주의 내용과 분리하여 하나의 완성된 문장으로 연결하고, 각주는 원본 순서에 따라 별개로 추출해야 합니다.
     """
 
 
@@ -134,14 +150,12 @@ def get_english_extraction_prompt() -> str:
             - and this applies to all ships.
 
     (2) Exclusion Items
-      1) Exclude page numbers that repeat on every page. (e.g., Page 6 of 67, 15/63)
-      2) Exclude any right-aligned exact phrase "Back to Contents".
-      3) Ignore all superscript characters:
+      1) Exclude page numbers and headers that repeat on every page. (Usually headers contain titles of report writing organization, sub-titles, etc.)
+      2) Ignore all superscript characters:
         - All text formatted as superscript (e.g., ¹, ², ³) must be completely omitted from the extracted sentences.
         - These characters must never be converted to regular numbers or list items like 1, 2, etc. Simply discard them.
-        - This rule applies to footnote indicators, reference numbers, and all other uses of superscript.
+        - **Important Note**: Do not remove the superscript characters in footnotes.
         - Do not confuse with numbering characters. Do not remove numbering characters. Examples: "(1)", "1)", "1." etc. should not be removed.
-      4) Exclude footnotes that indicate sources at the bottom of the page (e.g., ¹ World Population Review, India Population 2021, nd)
 				
     (3) Inclusion Items
       1) Include the following content:
@@ -149,9 +163,9 @@ def get_english_extraction_prompt() -> str:
        - Numbered titles in the main body area (like "4.1.13 Tests", "1.1 Introduction")
        - List items and bullet points (e.g., "•", "o", "-", "(i)", "a.", etc.)
          * Examples: "- Ore carriers", "• Combination carriers", "(ii) acceptance criteria"
-       - Footnotes that indicate sources at the bottom of the page (e.g., ¹ World Population Review, India Population 2021, nd)
       2) **Extract sentences as they are, including mathematical formulas, any special characters, numbers, symbols, or foreign languages.**
-      3) Extract text within document elements such as tables.
+      3) Extract text within document elements such as tables or images.
+      4) Extract footnotes that indicate sources at the bottom of the page
 
     (4) Modification Prohibitions
       1) Do not arbitrarily modify the original file's text.
@@ -167,7 +181,7 @@ def get_english_extraction_prompt() -> str:
       "sentences": [
         {
           "text": "extracted sentence",
-          "source_type": "table|text"
+          "source_type": "table|text|image|footnote"
         }
       ]
     }
@@ -183,9 +197,17 @@ def get_english_extraction_prompt() -> str:
           "source_type": "text"
         },
         {
+          "text": "Figure 1. Example of Activity",
+          "source_type": "image"
+        },
+        {
           "text": "Periodical Survey",
           "source_type": "table"
         },
+        {
+          "text": "¹³ For more information on the exclusion grounds, refer to EASO, Practical Guide: Exclusion, January 2017; and EASO, Practical Guide on Exclusion for Serious (Non-political) Crimes, December 2021.",
+          "source_type": "footnote"
+        }
       ]
     }
     
@@ -200,15 +222,23 @@ def get_english_extraction_prompt() -> str:
       2) "text": General body text.
         - Paragraphs, general titles, lists, and any other text that does not belong to a table or an image.
         - **Important Note**: When a table is merely mentioned in the main body (e.g., "Table 10: ..."), this reference is classified as 'text'. Only the title directly above the table itself is classified as 'table'.
+      
+      3) "image": Text within images, diagrams, figures, or charts.
+        - Text embedded within graphic elements like images, diagrams, charts, or flowcharts.
+        - The **title of an image** should also be classified as 'image' (e.g., "Figure 7. ...")
+      
+      4) "footnote": All text related to footnotes.
+        - The content of footnotes.
 
     (2) Guidelines
       1) Always specify an appropriate source_type for each sentence.
       2) When ambiguous, classify based on the most direct source.
 
     3. Important Rules
-      1) Extract all paragraphs, sentences, tables, and text without omission. (For example, if '3.8.1' is numbered, output it, but if '3.8.2' is omitted, it is incorrect.)
+      1) Extract all paragraphs, sentences, tables, and text without omission from all pages. (For example, if '3.8.1' is numbered, output it, but if '3.8.2' is omitted, it is incorrect.)
       2) Do not confuse similar paragraphs and extract them in order.
-      3) Always output the numbering. It is crucial for Korean-English parallel corpus generation.
+      3) Numbering Preservation Rule: All original numbering (e.g., "1.1", "a)" etc.) is critical for text alignment. You **must extract it exactly as it appears, without altering or omitting its format, order, or position.**
       4) Pay attention to numbering in titles and numbering in tables. Extract them in order without omission.
       5) Principle of Object Separation: Each {} object in the sentences array MUST contain only one sentence. Do not merge multiple sentences into one object.
+      6) Page Boundary Handling: When a sentence is split across a page, connect it into a single, complete sentence, separate from the content of any intervening footnote. The footnote itself must then be extracted separately in its original order.
     """
