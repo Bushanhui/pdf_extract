@@ -303,6 +303,7 @@ class PDFToCorpusConverter:
                     # 에러 타입 분류 및 상세 로깅
                     if self._is_daily_quota_exceeded(e):
                         logger.warning(f"📊 일별 할당량 초과 감지: {error_message}")
+                        self._mark_key_quota_exceeded(self.current_key_index)
                         error_type = "일별 할당량 초과"
                     elif self._is_file_access_error(e):
                         logger.warning(f"🔒 파일 접근 권한 에러 감지: {error_message}")
