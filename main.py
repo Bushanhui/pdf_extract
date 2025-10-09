@@ -12,6 +12,7 @@ import json
 import time
 import logging
 import glob
+import importlib.util
 from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -51,18 +52,74 @@ except Exception as e:
     langfuse = None
 
 
+def extract_suffix_from_path(file_path: str) -> str:
+    """파일 경로에서 suffix를 추출 (DATA/data_호주/file.pdf → 호주)"""
+    path_parts = Path(file_path).parts
+
+    for part in path_parts:
+        if part.startswith('data_'):
+            suffix = part.replace('data_', '')
+            if suffix:  # 빈 문자열이 아닌 경우만 반환
+                return suffix
+
+    return ""  # suffix를 찾을 수 없는 경우
+
+
+def load_prompt_module(suffix: str):
+    """suffix에 맞는 프롬프트 모듈을 동적으로 로드"""
+    prompt_file = f"PROMPT/prompt_{suffix}.py"
+
+    if not os.path.exists(prompt_file):
+        logger.warning(f"⚠️ 프롬프트 파일을 찾을 수 없습니다: {prompt_file}")
+        logger.info("기본 프롬프트를 사용합니다.")
+        # 기본 프롬프트 모듈 반환
+        import prompt
+        return prompt
+
+    try:
+        # 동적으로 모듈 로드
+        spec = importlib.util.spec_from_file_location(f"prompt_{suffix}", prompt_file)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        logger.info(f"✅ 프롬프트 모듈 로드 완료: {prompt_file}")
+        return module
+
+    except Exception as e:
+        logger.error(f"❌ 프롬프트 모듈 로드 실패: {prompt_file}, 오류: {e}")
+        logger.info("기본 프롬프트를 사용합니다.")
+        # 기본 프롬프트 모듈 반환
+        import prompt
+        return prompt
+
+
+def generate_db_path(suffix: str) -> str:
+    """suffix에 맞는 DB 파일 경로를 생성"""
+    if suffix:
+        return f"corpus_{suffix}.db"
+    else:
+        return "corpus.db"
+
+
 class PDFToCorpusConverter:
     """PDF에서 한국어 또는 영어 문장을 추출하여 병렬 코퍼스 데이터베이스에 저장하는 클래스"""
 
-    def __init__(self, api_key: Optional[str] = None, db_path: str = "corpus.db"):
+    def __init__(self, api_key: Optional[str] = None, db_path: str = "corpus.db", suffix: str = ""):
         """
         PDFToCorpusConverter 초기화
-        
+
         Args:
-            api_key (str, optional): Google AI API 키. 
+            api_key (str, optional): Google AI API 키.
                                    None인 경우 GOOGLE_API_KEY 환경변수에서 가져옵니다.
             db_path (str): SQLite 데이터베이스 파일 경로
+            suffix (str): 프롬프트 및 DB 파일명 suffix
         """
+        # Suffix 설정
+        self.suffix = suffix
+
+        # Suffix 기반 프롬프트 모듈 로드
+        self.prompt_module = load_prompt_module(suffix) if suffix else None
+
         # API 키 리스트 설정
         self.api_keys = []
         
@@ -210,11 +267,17 @@ class PDFToCorpusConverter:
                 }
             )
 
-        # 기본 프롬프트 설정
+        # 프롬프트 설정 (suffix 기반 동적 로딩 또는 기본값)
         if language == "korean":
-            prompt = get_korean_extraction_prompt()
+            if self.prompt_module:
+                prompt = self.prompt_module.get_korean_extraction_prompt()
+            else:
+                prompt = get_korean_extraction_prompt()
         elif language == "english":
-            prompt = get_english_extraction_prompt()
+            if self.prompt_module:
+                prompt = self.prompt_module.get_english_extraction_prompt()
+            else:
+                prompt = get_english_extraction_prompt()
         else:
             raise ValueError(f"지원하지 않는 언어입니다: {language}. 'korean' 또는 'english'만 지원합니다.")
         
@@ -1833,33 +1896,50 @@ class PDFToCorpusConverter:
 if __name__ == "__main__":
     # 예시 실행 코드
     import sys
-    
+
     # 기본값 설정
     default_pdf = "document.pdf"
     default_language = "korean"
     default_db = "corpus.db"
-    
+
     # 커맨드라인 인자에서 파일 경로 가져오기
     pdf_file = sys.argv[1] if len(sys.argv) > 1 else default_pdf
     language = sys.argv[2] if len(sys.argv) > 2 else default_language
     db_file = sys.argv[3] if len(sys.argv) > 3 else default_db
-    
+
     try:
         # 환경변수에서 API 키 가져오기
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:
             print("오류: GOOGLE_API_KEY 환경변수를 설정해주세요.")
             sys.exit(1)
-        
+
+        # 파일 경로에서 suffix 자동 추출
+        suffix = extract_suffix_from_path(pdf_file)
+
         print("=== PDF to 병렬 코퍼스 변환기 ===")
         print(f"입력 파일: {pdf_file}")
         print(f"언어: {language}")
-        print(f"데이터베이스: {db_file}")
+
+        if suffix:
+            # suffix가 감지된 경우: 동적 DB 파일명 생성
+            db_file = generate_db_path(suffix)
+            print(f"🔍 감지된 suffix: {suffix}")
+            print(f"📁 프롬프트: PROMPT/prompt_{suffix}.py")
+        else:
+            print("🔍 suffix 없음 - 기본 설정 사용")
+
+        print(f"🗃️ 데이터베이스: {db_file}")
         print()
-        
-        # 변환기 생성 및 실행
-        converter = PDFToCorpusConverter(api_key, db_file)
-        result = converter.process_pdf_to_corpus(pdf_file, language)
+
+        # 변환기 생성 및 실행 (suffix 포함)
+        converter = PDFToCorpusConverter(api_key, db_file, suffix)
+
+        # 단일 파일 처리 또는 폴더 처리 결정
+        if os.path.isdir(pdf_file):
+            result = converter.process_folder_to_corpus(pdf_file, language)
+        else:
+            result = converter.process_pdf_to_corpus(pdf_file, language)
         
         # 결과 출력
         print("\n=== 처리 결과 ===")

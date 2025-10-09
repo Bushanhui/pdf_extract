@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
 
-from main import PDFToCorpusConverter
+from main import PDFToCorpusConverter, extract_suffix_from_path, generate_db_path
 
 # 환경 변수 로드
 load_dotenv()
@@ -156,8 +156,9 @@ def main():
         sys.exit(1)
     
     try:
-        # 변환기 생성 (카운트 모드에서는 API 키 없이도 가능)
-        converter = PDFToCorpusConverter(api_key, args.db_path)
+        # 폴더 모드가 아닌 경우 기본 변환기 생성
+        if not args.folder:
+            converter = PDFToCorpusConverter(api_key, args.db_path)
         
         
         # 재시도 모드들 처리
@@ -216,6 +217,18 @@ def main():
             if not Path(args.folder).exists():
                 print(f"오류: 지정된 폴더를 찾을 수 없습니다: {args.folder}")
                 sys.exit(1)
+
+            # 폴더 경로에서 suffix 자동 추출
+            folder_suffix = extract_suffix_from_path(args.folder)
+
+            # suffix 기반 DB 경로 생성 (명령행 --db-path가 기본값인 경우에만)
+            if args.db_path == "corpus.db":  # 기본값인 경우만 동적 생성
+                dynamic_db_path = generate_db_path(folder_suffix)
+                print(f"🔍 감지된 suffix: '{folder_suffix}'")
+                print(f"🗃️ 동적 생성된 DB 경로: {dynamic_db_path}")
+            else:
+                dynamic_db_path = args.db_path
+                print(f"🗃️ 사용자 지정 DB 경로: {dynamic_db_path}")
             
             if args.verbose:
                 print("=== PDF 폴더 일괄 처리 모드 ===")
@@ -242,10 +255,13 @@ def main():
                     print(f"API 키: 1개만 설정됨 (백업 키 권장: GOOGLE_API_KEY_BACKUP_1, GOOGLE_API_KEY_BACKUP_2, ...)")
                 print()
             
+            # suffix 기반 변환기 생성
+            converter = PDFToCorpusConverter(api_key, dynamic_db_path, folder_suffix)
+
             # 폴더 처리 실행
             print("🚀 폴더 배치 처리 모드로 실행합니다...")
             print("📦 각 파일을 10페이지씩 배치 분할하여 처리합니다.")
-            
+
             result = converter.process_folder(args.folder)
             
             if result["success"]:
