@@ -196,34 +196,28 @@ def add_metadata_to_csv(
     # 6. 컬럼 순서 재정렬
     print("\n6. 컬럼 순서 재정렬 중...")
 
-    # 원본 컬럼
+    # 원본 컬럼 (1-10)
     original_cols = [
         'kr_idx', 'kr_id', 'kr_text', 'kr_source_type',
         'en_idx', 'en_id', 'en_text', 'en_source_type',
         'similarity', 'match_type'
     ]
 
-    # 정규화된 텍스트
-    text_cols = [
-        'kr_text_cleaned', 'en_text_cleaned',
-        'kr_text_normalized', 'en_text_normalized'
+    # 통계 컬럼 (11-17) - match_type 바로 뒤
+    stat_cols = [
+        'potential_split',
+        'word_ratio', 'word_count_kr', 'word_count_en',
+        'chr_len_ratio', 'chr_len_kr', 'chr_len_en'
     ]
 
-    # 매칭 상태
+    # 매칭 상태 (18-22)
     status_cols = [
         'punct_match_type', 'number_match_status',
         'eng_word_match_status', 'symbol_match_status',
         'only_eng_korean_sentence'
     ]
 
-    # 통계
-    stat_cols = [
-        'word_count_kr', 'word_count_en', 'word_ratio',
-        'chr_len_kr', 'chr_len_en', 'chr_len_ratio',
-        'potential_split'
-    ]
-
-    # 상세 정보 (Dict 타입)
+    # 상세 정보 (23-33) - Dict 타입
     detail_cols = [
         'kor_punct', 'eng_punct', 'punct_differences',
         'kor_numbers', 'eng_numbers_after_mapping', 'num_differences',
@@ -231,9 +225,15 @@ def add_metadata_to_csv(
         'kor_special_symbols', 'eng_special_symbols', 'symbol_differences'
     ]
 
-    # 최종 컬럼 순서
+    # 정규화된 텍스트 (34-37) - 가장 뒤
+    text_cols = [
+        'kr_text_cleaned', 'en_text_cleaned',
+        'kr_text_normalized', 'en_text_normalized'
+    ]
+
+    # 최종 컬럼 순서: original → stat → status → detail → text
     final_cols = []
-    for col_list in [original_cols, text_cols, status_cols, stat_cols, detail_cols]:
+    for col_list in [original_cols, stat_cols, status_cols, detail_cols, text_cols]:
         final_cols.extend([c for c in col_list if c in df.columns])
 
     # 누락된 컬럼 추가
