@@ -11,10 +11,11 @@ import sys
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import google.generativeai as genai
 from dotenv import load_dotenv
+from langfuse.decorators import observe
 
 # 환경 변수 로드
 load_dotenv()
@@ -177,36 +178,167 @@ class BatchProcessor:
 
 
 class APIKeyManager:
-    """API 키 관리 클래스 (main.py에서 핵심 로직만 추출)"""
+    """API 키 관리 클래스 (일일 할당량 추적 포함)"""
 
     def __init__(self):
-        # API 키들 로드
-        self.api_keys = [
-            os.getenv("GOOGLE_API_KEY"),
-            os.getenv("GOOGLE_API_KEY_BACKUP1"),
-            os.getenv("GOOGLE_API_KEY_BACKUP2"),
-            os.getenv("GOOGLE_API_KEY_BACKUP3")
-        ]
+        # API 키들 로드 (BACKUP1, BACKUP2, ... 형식)
+        self.api_keys = []
 
-        # None 값 제거
-        self.api_keys = [key for key in self.api_keys if key]
+        # 메인 키 추가
+        primary_key = os.getenv("GOOGLE_API_KEY")
+        if primary_key:
+            self.api_keys.append(primary_key)
+
+        # 백업 키들 추가 (GOOGLE_API_KEY_BACKUP_1, GOOGLE_API_KEY_BACKUP_2, ...)
+        backup_index = 1
+        while True:
+            backup_key = os.getenv(f"GOOGLE_API_KEY_BACKUP_{backup_index}")
+            if backup_key:
+                self.api_keys.append(backup_key)
+                backup_index += 1
+            else:
+                break
 
         if not self.api_keys:
             raise ValueError("API 키가 설정되지 않았습니다.")
 
-        self.current_key_index = 0
-        self.current_api_key = self.api_keys[0]
+        # API 키 상태 관리
+        self.usage_file = "api_key_usage.json"
+        self._load_key_usage()  # JSON에서 키 상태 로드
+        self.current_key_index = self._get_available_key_index()
+        self.current_api_key = self.api_keys[self.current_key_index]
 
         # genai 초기화
         genai.configure(api_key=self.current_api_key)
 
+        # API 키 상태 출력
+        print(f"✅ 설정된 API 키 개수: {len(self.api_keys)}개")
+        for i, key in enumerate(self.api_keys):
+            key_type = "메인" if i == 0 else f"백업{i}"
+            key_id = f"***{key[-4:]}"
+            key_info = self.key_usage.get(key_id, {'status': 'available'})
+            status_emoji = "🟢" if key_info['status'] == 'available' else "🔴"
+            current_mark = " ←현재선택" if i == self.current_key_index else ""
+            print(f"  {key_type} API 키: {key_id} {status_emoji}{key_info['status']}{current_mark}")
+
+    def _load_key_usage(self) -> None:
+        """JSON 파일에서 API 키 사용 상태를 로드하고 24시간 경과 키는 자동으로 리셋"""
+        try:
+            if not Path(self.usage_file).exists():
+                self.key_usage = self._initialize_key_usage()
+                self._save_key_usage()
+                print(f"📝 API 키 사용량 추적 파일 생성: {self.usage_file}")
+                return
+
+            with open(self.usage_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                self.key_usage = data.get('keys', {})
+
+            # 24시간 경과 키들을 자동으로 available로 리셋
+            current_time = datetime.now()
+            reset_count = 0
+
+            for key_id, key_info in self.key_usage.items():
+                if key_info.get('reset_time'):
+                    reset_time = datetime.fromisoformat(key_info['reset_time'])
+                    if current_time >= reset_time and key_info['status'] == 'exhausted':
+                        key_info['status'] = 'available'
+                        key_info['first_used'] = None
+                        key_info['reset_time'] = None
+                        reset_count += 1
+
+            if reset_count > 0:
+                print(f"🔄 {reset_count}개 API 키가 24시간 경과로 사용 가능 상태로 리셋됨")
+                self._save_key_usage()
+
+            print(f"✅ API 키 사용량 상태 로드 완료: {len(self.key_usage)}개 키")
+
+        except Exception as e:
+            print(f"⚠️ API 키 사용량 로드 실패, 초기화합니다: {e}")
+            self.key_usage = self._initialize_key_usage()
+            self._save_key_usage()
+
+    def _initialize_key_usage(self) -> Dict[str, Dict[str, Any]]:
+        """모든 API 키를 사용 가능 상태로 초기화"""
+        usage = {}
+        for api_key in self.api_keys:
+            key_id = f"***{api_key[-4:]}"
+            usage[key_id] = {
+                'first_used': None,
+                'status': 'available',
+                'reset_time': None
+            }
+        return usage
+
+    def _save_key_usage(self) -> None:
+        """현재 API 키 사용 상태를 JSON 파일에 저장"""
+        try:
+            data = {
+                'keys': self.key_usage,
+                'last_updated': datetime.now().isoformat()
+            }
+
+            with open(self.usage_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+        except Exception as e:
+            print(f"⚠️ API 키 사용량 저장 실패: {e}")
+
+    def _get_available_key_index(self) -> int:
+        """사용 가능한 첫 번째 API 키의 인덱스를 반환"""
+        for i, api_key in enumerate(self.api_keys):
+            key_id = f"***{api_key[-4:]}"
+            key_info = self.key_usage.get(key_id, {'status': 'available'})
+
+            if key_info['status'] == 'available':
+                print(f"🔑 사용 가능한 API 키 선택: {key_id} (인덱스 {i})")
+                return i
+
+        # 사용 가능한 키가 없으면 첫 번째 키 사용
+        print(f"⚠️ 사용 가능한 키가 없어 메인 키부터 시작합니다")
+        return 0
+
+    def _mark_key_exhausted(self, key_index: int) -> None:
+        """지정된 키를 할당량 소진 상태로 마킹하고 24시간 후 리셋 시간을 설정"""
+        if key_index >= len(self.api_keys):
+            return
+
+        api_key = self.api_keys[key_index]
+        key_id = f"***{api_key[-4:]}"
+        current_time = datetime.now()
+
+        if key_id not in self.key_usage:
+            self.key_usage[key_id] = {'first_used': None, 'status': 'available', 'reset_time': None}
+
+        # 첫 사용인 경우 시작 시간 기록
+        if not self.key_usage[key_id]['first_used']:
+            self.key_usage[key_id]['first_used'] = current_time.isoformat()
+
+        # 상태를 exhausted로 변경하고 24시간 후 리셋 시간 설정
+        self.key_usage[key_id]['status'] = 'exhausted'
+        self.key_usage[key_id]['reset_time'] = (current_time + timedelta(hours=24)).isoformat()
+
+        self._save_key_usage()
+
+        reset_time_str = (current_time + timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
+        print(f"⏰ API 키 {key_id} 할당량 소진으로 마킹, 리셋 시간: {reset_time_str}")
+
     def switch_to_next_key(self) -> bool:
-        """다음 API 키로 전환"""
+        """다음 API 키로 전환 (현재 키를 exhausted로 마킹)"""
+        # 현재 키를 할당량 소진 상태로 마킹
+        self._mark_key_exhausted(self.current_key_index)
+
         if self.current_key_index < len(self.api_keys) - 1:
             self.current_key_index += 1
             self.current_api_key = self.api_keys[self.current_key_index]
+
+            key_type = "메인" if self.current_key_index == 0 else f"백업 키 {self.current_key_index}"
+            print(f"🔄 다음 API 키로 전환: {key_type} (***...{self.current_api_key[-4:]})")
+
             genai.configure(api_key=self.current_api_key)
             return True
+
+        print(f"❌ 모든 API 키 ({len(self.api_keys)}개) 사용 완료")
         return False
 
 
@@ -218,84 +350,225 @@ class SentenceComposer:
         self.logger = logger
         self.session_id = f"sentence_compose_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-        # 문장 구성 전용 프롬프트
-        self.compose_prompt = """당신은 기계 번역 학습 데이터셋을 만들기 위해, 텍스트 덩어리를 의미론적으로 완전한 문장 또는 구문 단위로 재구성하는 AI 전문가입니다.
+        # 문장 구성 전용 프롬프트 (P 태그만 처리)
+        self.compose_prompt = """당신은 기계 번역 학습 데이터셋을 만들기 위해, 줄바꿈으로 나뉜 텍스트 조각들을 의미론적으로 완전한 문장 단위로 재구성하는 AI 전문가입니다.
 
-DB에 한 문장(또는 구문)씩 저장하기 위해 주어진 JSON 형식에 따라 출력해주세요.
-
-입력 데이터는 'source_type'과 'text' 키를 가진 JSON 객체들의 배열입니다.
+**# 입력 형식**
+줄바꿈(`\n`)으로 구분된 텍스트 조각들이 주어집니다. 각 줄은 본문(P) 텍스트의 일부입니다.
 
 **# 최종 목표**
-입력된 텍스트 조각들을 합쳐서 의미상 완전한 문장들로 구성된 새로운 배열을 최종 출력물로 만드는 것이 목표입니다.
+입력된 텍스트 조각들을 합쳐서 의미상 완전한 문장들로 구성된 JSON 배열을 출력하는 것이 목표입니다.
 
 **# 처리 규칙**
 
-1. **H1, H2 태그 처리**:
-   - 'source_type'이 'H1' 또는 'H2'인 객체는 **내용을 변경하지 말고 그대로** 최종 출력 배열에 추가합니다.
+1. **문장 병합 규칙**:
+   - 줄바꿈으로 나뉜 텍스트를 순서대로 읽으면서, 완전한 문장이 될 때까지 이어 붙입니다.
+   - 완전한 문장 기준:
+     * 마침표(.), 물음표(?), 느낌표(!) 등으로 끝나고 의미가 완결된 경우
+     * 괄호 짝이 맞는 경우: 여는 괄호(`[`, `(`)가 있으면 닫는 괄호(`]`, `)`)까지 이어 붙여야 함
+   - 이미 완전한 문장인 경우 그대로 출력 배열에 추가합니다.
 
-2. **P (본문) 태그 처리 (가장 중요)**:
-(1) 작업 순서:
-   - 'source_type'이 'P'인 객체들을 순서대로 읽습니다.
-   - 완전한 하나의 문장 또는 구문 단위를 완성할 때까지 **다음 'P' 객체의 텍스트를 계속 이어 붙여서** 하나의 완전한 문장(또는 구문)을 완성합니다.
-   - 만약 이미 완전한 문장 또는 구문인 경우, 불필요한 공백을 제거하고 출력 배열에 추가합니다.
-   - 완성된 문장은 불필요한 공백을 제거하고 하나의 JSON 객체로 만들어 출력 배열에 추가합니다.
-(2) 작업 힌트:
-   - 완전한 문장이 완료되는 지점은 다음과 같은 규칙에서 힌트를 얻을 수 있습니다.
-    규칙1: 마침표(.), 물음표(?), 느낌표(!) 등으로 끝나는 경우 완전한 문장이 완료되었다고 판단합니다.
-    규칙2: 괄호 처리. 여는 괄호(`[`, `(`)로 시작한 텍스트는 짝이 맞는 닫는 괄호(`]`, `)`)가 나올 때까지 다음 객체의 텍스트를 계속 이어 붙여야 합니다. 괄호 안의 내용이 여러 줄에 걸쳐 나뉘어 있어도 하나의 의미 단위로 합쳐야 합니다.
-(3) 주의 사항:
-   - 주의 1: 하나의 입력 객체 안에 여러 개의 완전한 문장이 있을 경우, 각각을 별개의 출력 객체로 나눠야 합니다. 즉, 각 `{}` 객체는 반드시 하나의 문장만을 가져야 합니다. 여러 문장을 하나의 객체에 합치지 마세요.
-   - 주의 2: 하나의 입력 객체는 반드시 한 번만 처리되어야 합니다. 여러 번 처리하지 마세요.
-   - 주의 3: 각 객체의 순서는 원본 파일의 순서를 유지하며 처리해주세요.
+2. **문장 분리 규칙**:
+   - 하나의 줄에 여러 개의 완전한 문장이 있으면, 각각을 별개의 JSON 객체로 분리합니다.
+   - 각 JSON 객체는 반드시 하나의 완전한 문장만 포함해야 합니다.
 
-3. **출력 형식**:
-   - 최종 출력물은 `{"text": "...", "source_type": "H1|H2|P"}` 스키마를 따르는 JSON 배열이어야 합니다.
-   - 출력 배열의 순서는 원본 파일의 순서를 유지하며 처리해주세요.
+3. **텍스트 정리**:
+   - 불필요한 공백 제거 (여러 개의 공백은 하나로)
+   - 괄호 앞뒤 공백 정리: `( text )` → `(text)`
 
-   **예시(H1, H2)**:
-   - input:
-    {
-        "text": "더블린 규정에 따라 이탈리아로 이송할 수 있는 요건의 완화",
-        "source_type": "H2"
-    },
-    - output:
-    {
-        "text": "더블린 규정에 따라 이탈리아로 이송할 수 있는 요건의 완화",
-        "source_type": "H2"
-    }
+**# 출력 형식**
+JSON 배열로 출력하며, 각 객체는 다음 스키마를 따릅니다:
+```
+{"text": "완전한 문장", "source_type": "P"}
+```
+- `text`: 의미적으로 완전한 하나의 문장
+- `source_type`: 항상 "P" (본문)
 
-   **예시(P)**:
-   - input:
-    {
-        "text": "보호자 미동반 아동",
-        "source_type": "P"
-    },
-    {
-        "text": "룩셈부르크 행정법원은 A 와 S 에 대한 유럽연합사법재판소 (CJEU) 판결 ( 제 C-550/16 호 ) 을 고려하여 미성년자가",
-        "source_type": "P"
-    },
-    {
-        "text": "보호자 미동반 아동으로 간주되는 조건을 분석하였다 .",
-        "source_type": "P"
-    }
-    - output:
-    {
-        "text": "보호자 미동반 아동",
-        "source_type": "P"
-    },
-    {
-        "text": "룩셈부르크 행정법원은 A와 S에 대한 유럽연합사법재판소(CJEU) 판결(제C-550/16호)을 고려하여 미성년자가 보호자 미동반 아동으로 간주되는 조건을 분석하였다.",
-        "source_type": "P"
-    }
+**# 예시**
+
+입력 텍스트:
+```
+보호자 미동반 아동
+룩셈부르크 행정법원은 A 와 S 에 대한 유럽연합사법재판소 (CJEU) 판결 ( 제 C-550/16 호 ) 을 고려하여 미성년자가
+보호자 미동반 아동으로 간주되는 조건을 분석하였다 .
+```
+
+출력 JSON:
+```json
+[
+  {"text": "보호자 미동반 아동", "source_type": "P"},
+  {"text": "룩셈부르크 행정법원은 A와 S에 대한 유럽연합사법재판소(CJEU) 판결(제C-550/16호)을 고려하여 미성년자가 보호자 미동반 아동으로 간주되는 조건을 분석하였다.", "source_type": "P"}
+]
+```
 
 **반드시 JSON 배열만 출력하고, 다른 설명이나 텍스트는 포함하지 마세요.**"""
+
+    def split_into_sections(self, input_data: List[Dict]) -> List[Dict[str, Any]]:
+        """입력 데이터를 H1/H2/H3 기준으로 섹션으로 분할
+
+        Args:
+            input_data: JSON 객체 배열 (id, text, source_type 포함)
+
+        Returns:
+            섹션 리스트. 각 섹션은 {'headers': [H1/H2/H3 항목들], 'p_items': [P 항목들]} 형태
+        """
+        if not input_data:
+            return []
+
+        sections = []
+        current_section = {'headers': [], 'p_items': []}
+
+        for item in input_data:
+            if item.get('source_type') in ['H1', 'H2', 'H3']:
+                # 이전 섹션이 있으면 저장
+                if current_section['p_items'] or current_section['headers']:
+                    sections.append(current_section)
+                # 새 섹션 시작
+                current_section = {
+                    'headers': [item],
+                    'p_items': []
+                }
+            else:  # P
+                current_section['p_items'].append(item)
+
+        # 마지막 섹션 저장
+        if current_section['p_items'] or current_section['headers']:
+            sections.append(current_section)
+
+        return sections
+
+    def process_section_p_batch(self, p_items: List[Dict], section_number: int, part_info: str, batch_size: int = 100) -> List[Dict]:
+        """섹션 내 P 항목들을 배치 단위로 LLM 처리
+
+        Args:
+            p_items: 처리할 P 항목 리스트
+            section_number: 섹션 번호 (로깅용)
+            part_info: 파트 정보 (예: "1부_kr")
+            batch_size: 배치 크기 (기본값 100)
+
+        Returns:
+            LLM 처리된 P 항목 리스트
+        """
+        if not p_items:
+            return []
+
+        all_composed_p = []
+        total_p_count = len(p_items)
+        batch_num = 1
+        start_idx = 0
+
+        self.logger.info(f"  섹션 {section_number}: {total_p_count}개 P 항목을 {batch_size}개씩 배치 처리")
+
+        while start_idx < total_p_count:
+            # 배치 끝 인덱스 계산
+            end_idx = min(start_idx + batch_size, total_p_count)
+            batch_data = p_items[start_idx:end_idx]
+
+            self.logger.info(f"    배치 {batch_num} 처리 중... ({len(batch_data)}개 P 항목)")
+
+            # LLM 호출
+            result = self.process_batch(batch_data, batch_num, part_info)
+
+            if result['success']:
+                all_composed_p.extend(result['composed_data'])
+                self.logger.info(f"    ✓ 배치 {batch_num} 완료: {len(batch_data)}개 → {len(result['composed_data'])}개")
+            else:
+                self.logger.error(f"    ✗ 배치 {batch_num} 실패: {result.get('error', '알 수 없는 오류')}")
+                # 실패한 경우 원본 데이터를 그대로 추가
+                all_composed_p.extend(batch_data)
+
+            start_idx = end_idx
+            batch_num += 1
+
+        return all_composed_p
+
+    def process_file(self, input_data: List[Dict], part_info: str, batch_size: int = 100) -> Tuple[List[Dict], Dict[str, Any], List[Dict]]:
+        """파일 전체를 섹션별로 처리
+
+        Args:
+            input_data: 입력 JSON 데이터 (전체 파일)
+            part_info: 파트 정보 (예: "1부_kr")
+            batch_size: P 배치 처리 크기 (기본값 100)
+
+        Returns:
+            (최종 결과 리스트, 메타데이터 딕셔너리, H1/H2/H3 헤더 리스트)
+        """
+        # 1. 섹션으로 분할
+        self.logger.info(f"섹션 분할 중...")
+        sections = self.split_into_sections(input_data)
+        self.logger.info(f"총 {len(sections)}개 섹션으로 분할됨")
+
+        # 2. 각 섹션 처리
+        final_results = []
+        all_headers = []  # H1/H2/H3 헤더만 별도로 수집
+        total_h1_count = 0
+        total_h2_count = 0
+        total_h3_count = 0
+        total_input_p_count = 0
+        total_output_p_count = 0
+
+        for idx, section in enumerate(sections, 1):
+            self.logger.info(f"\n섹션 {idx}/{len(sections)} 처리 중...")
+
+            # H1/H2/H3 직접 추가 (LLM 처리 없음)
+            headers = section.get('headers', [])
+            for header in headers:
+                final_results.append(header)
+                all_headers.append(header)  # anchor용 별도 수집
+                if header.get('source_type') == 'H1':
+                    total_h1_count += 1
+                elif header.get('source_type') == 'H2':
+                    total_h2_count += 1
+                elif header.get('source_type') == 'H3':
+                    total_h3_count += 1
+
+            if headers:
+                self.logger.info(f"  H1/H2/H3 헤더: {len(headers)}개 직접 추가 (LLM 처리 안 함)")
+
+            # P 항목 처리
+            p_items = section.get('p_items', [])
+            if p_items:
+                total_input_p_count += len(p_items)
+
+                # P가 1개만 있으면 LLM 처리 없이 직접 추가
+                if len(p_items) == 1:
+                    final_results.extend(p_items)
+                    total_output_p_count += 1
+                    self.logger.info(f"  P 항목: 1개 직접 추가 (LLM 처리 안 함)")
+                else:
+                    # P가 2개 이상이면 배치 처리
+                    composed_p = self.process_section_p_batch(p_items, idx, part_info, batch_size)
+                    final_results.extend(composed_p)
+                    total_output_p_count += len(composed_p)
+
+        # 3. 메타데이터 생성
+        metadata = {
+            "total_input_count": len(input_data),
+            "total_sections": len(sections),
+            "h1_count": total_h1_count,
+            "h2_count": total_h2_count,
+            "h3_count": total_h3_count,
+            "input_p_count": total_input_p_count,
+            "output_p_count": total_output_p_count,
+            "overall_compression_ratio": total_input_p_count / total_output_p_count if total_output_p_count > 0 else 0
+        }
+
+        self.logger.info(f"\n처리 완료!")
+        self.logger.info(f"  전체 입력: {len(input_data):,}개")
+        self.logger.info(f"  전체 출력: {len(final_results):,}개")
+        self.logger.info(f"  H1 헤더: {total_h1_count}개 (100% 보존)")
+        self.logger.info(f"  H2 헤더: {total_h2_count}개 (100% 보존)")
+        self.logger.info(f"  H3 헤더: {total_h3_count}개 (100% 보존)")
+        self.logger.info(f"  P 압축률: {metadata['overall_compression_ratio']:.1f}배 ({total_input_p_count} → {total_output_p_count})")
+
+        return final_results, metadata, all_headers
 
     def process_batch(self, batch_data: List[Dict], batch_number: int, part_info: str) -> Dict[str, Any]:
         """
         배치 데이터를 LLM으로 처리하여 문장을 구성합니다.
 
         Args:
-            batch_data: 처리할 배치 데이터
+            batch_data: 처리할 배치 데이터 (P 항목들)
             batch_number: 배치 번호
             part_info: 파트 정보 (예: "1부_kr")
 
@@ -303,23 +576,14 @@ DB에 한 문장(또는 구문)씩 저장하기 위해 주어진 JSON 형식에 
             처리 결과
         """
         try:
-            self.logger.info(f"배치 {batch_number} 처리 시작 ({len(batch_data)}개 객체)")
+            self.logger.info(f"배치 {batch_number} 처리 시작 ({len(batch_data)}개 P 항목)")
 
-            # 입력 데이터 분석
-            input_h1_count = len([item for item in batch_data if item.get('source_type') == 'H1'])
-            input_h2_count = len([item for item in batch_data if item.get('source_type') == 'H2'])
-
-            # 입력 데이터를 JSON 문자열로 변환
-            input_json = json.dumps(batch_data, ensure_ascii=False, indent=2)
-
-            # LLM에 전송할 메시지 구성
-            messages = [
-                {"role": "user", "content": f"{self.compose_prompt}\n\n입력 데이터:\n{input_json}"}
-            ]
+            # P 항목들의 text를 줄바꿈으로 이어붙이기
+            input_text = "\n".join([item['text'] for item in batch_data])
 
             # LLM 호출
             start_time = time.time()
-            response = self._call_llm_simple(input_json)
+            response = self._call_llm_simple(input_text)
 
             if not response:
                 self.logger.error(f"배치 {batch_number}: LLM 응답을 받지 못했습니다")
@@ -343,32 +607,11 @@ DB에 한 문장(또는 구문)씩 저장하기 위해 주어진 JSON 형식에 
 
             processing_time = time.time() - start_time
 
-            # 출력 데이터 분석
-            output_h1_count = len([item for item in composed_data if item.get('source_type') == 'H1'])
-            output_h2_count = len([item for item in composed_data if item.get('source_type') == 'H2'])
-
-            # 보존율 계산
-            h1_preservation = (output_h1_count / input_h1_count) * 100 if input_h1_count > 0 else 100
-            h2_preservation = (output_h2_count / input_h2_count) * 100 if input_h2_count > 0 else 100
-
             # 압축률 계산
             compression_ratio = len(batch_data) / len(composed_data) if len(composed_data) > 0 else 0
 
             # 로그 출력
-            self.logger.info(f"├─ 압축률: {compression_ratio:.1f}배 ({len(batch_data)}개 → {len(composed_data)}개)")
-
-            if input_h1_count > 0:
-                status = "✓" if h1_preservation == 100 else "⚠️"
-                self.logger.info(f"├─ H1 보존율: {h1_preservation:.1f}% ({output_h1_count}/{input_h1_count}개) {status}")
-                if h1_preservation < 100:
-                    self.logger.warning(f"H1 보존율이 100% 미만입니다. 확인 필요.")
-
-            if input_h2_count > 0:
-                status = "✓" if h2_preservation == 100 else "⚠️"
-                self.logger.info(f"├─ H2 보존율: {h2_preservation:.1f}% ({output_h2_count}/{input_h2_count}개) {status}")
-                if h2_preservation < 100:
-                    self.logger.warning(f"H2 보존율이 100% 미만입니다. 확인 필요.")
-
+            self.logger.info(f"├─ 압축률: {compression_ratio:.1f}배 ({len(batch_data)}개 P → {len(composed_data)}개 문장)")
             self.logger.info(f"└─ 처리시간: {processing_time:.1f}초")
 
             return {
@@ -377,8 +620,6 @@ DB에 한 문장(또는 구문)씩 저장하기 위해 주어진 JSON 형식에 
                 "input_count": len(batch_data),
                 "output_count": len(composed_data),
                 "compression_ratio": compression_ratio,
-                "h1_preservation_rate": h1_preservation,
-                "h2_preservation_rate": h2_preservation,
                 "composed_data": composed_data,
                 "processing_time": processing_time
             }
@@ -391,8 +632,11 @@ DB에 한 문장(또는 구문)씩 저장하기 위해 주어진 JSON 형식에 
                 "batch_number": batch_number
             }
 
-    def _call_llm_simple(self, input_json: str) -> Optional[str]:
-        """간단한 LLM 호출 (JSON 입력받아 JSON 응답 반환)"""
+    @observe(name="gemini_sentence_composition")
+    def _call_llm_simple(self, input_text: str) -> Optional[str]:
+        """간단한 LLM 호출 (텍스트 입력받아 JSON 응답 반환)"""
+        from langfuse.decorators import langfuse_context
+
         max_retries = len(self.api_manager.api_keys)
 
         # JSON Schema 정의
@@ -407,15 +651,32 @@ DB에 한 문장(또는 구문)씩 저장하기 위해 주어진 JSON 형식에 
                     },
                     "source_type": {
                         "type": "string",
-                        "description": "원본 출처 유형: H1|H2|P"
+                        "description": "원본 출처 유형: 항상 P"
                     }
                 },
                 "required": ["text", "source_type"]
             }
         }
 
+        # 전체 프롬프트 구성
+        full_prompt = f"{self.compose_prompt}\n\n입력 텍스트:\n{input_text}"
+
+        # Langfuse에 프롬프트와 입력 메타데이터 기록
+        langfuse_context.update_current_observation(
+            input=full_prompt,
+            metadata={
+                "model": "gemini-2.5-flash",
+                "temperature": 0.7,
+                "max_output_tokens": 65536,
+                "input_text_length": len(input_text),
+                "input_line_count": input_text.count('\n') + 1
+            }
+        )
+
         for attempt in range(max_retries):
             try:
+                llm_start_time = time.time()
+
                 # 모델 초기화 (structured output 및 temperature 0.7 설정)
                 model = genai.GenerativeModel(
                     "gemini-2.5-flash",
@@ -427,25 +688,53 @@ DB에 한 문장(또는 구문)씩 저장하기 위해 주어진 JSON 형식에 
                     }
                 )
 
-                # 전체 프롬프트 구성
-                full_prompt = f"{self.compose_prompt}\n\n입력 데이터:\n{input_json}"
-
                 # LLM 호출
                 response = model.generate_content(full_prompt)
 
+                llm_duration = time.time() - llm_start_time
+
                 if response and response.text:
+                    # Langfuse에 응답과 소요시간 기록
+                    langfuse_context.update_current_observation(
+                        output=response.text,
+                        metadata={
+                            "llm_duration_seconds": round(llm_duration, 2),
+                            "output_length": len(response.text),
+                            "attempt": attempt + 1,
+                            "api_key_index": self.api_manager.current_key_index
+                        }
+                    )
                     return response.text
 
                 return None
 
             except Exception as e:
                 error_message = str(e)
+                llm_duration = time.time() - llm_start_time if 'llm_start_time' in locals() else 0
+
+                # Langfuse에 에러 기록
+                langfuse_context.update_current_observation(
+                    metadata={
+                        "error": error_message,
+                        "attempt": attempt + 1,
+                        "llm_duration_seconds": round(llm_duration, 2)
+                    }
+                )
+
                 self.logger.warning(f"API 호출 실패 (시도 {attempt + 1}/{max_retries}): {error_message}")
 
-                # 다음 API 키로 전환
-                if attempt < max_retries - 1 and self.api_manager.switch_to_next_key():
-                    self.logger.info(f"다음 API 키로 전환하여 재시도...")
-                    continue
+                # 할당량 초과 감지
+                if self._is_daily_quota_exceeded(e):
+                    self.logger.warning(f"📊 일별 할당량 초과 감지")
+                    # 다음 API 키로 전환
+                    if attempt < max_retries - 1 and self.api_manager.switch_to_next_key():
+                        self.logger.info(f"다음 API 키로 전환하여 재시도...")
+                        continue
+                else:
+                    # 다음 API 키로 전환 (일반 에러)
+                    if attempt < max_retries - 1 and self.api_manager.switch_to_next_key():
+                        self.logger.info(f"다음 API 키로 전환하여 재시도...")
+                        continue
 
                 # 모든 키 시도 완료
                 if attempt == max_retries - 1:
@@ -453,6 +742,20 @@ DB에 한 문장(또는 구문)씩 저장하기 위해 주어진 JSON 형식에 
                     return None
 
         return None
+
+    def _is_daily_quota_exceeded(self, error: Exception) -> bool:
+        """일별 할당량 초과 에러인지 확인"""
+        error_str = str(error).lower()
+        quota_keywords = [
+            "quota exceeded",
+            "daily limit exceeded",
+            "daily quota exceeded",
+            "exceeded your current quota",
+            "daily usage limit exceeded",
+            "requests per day exceeded",
+            "current quota"
+        ]
+        return any(keyword in error_str for keyword in quota_keywords)
 
     def _extract_json_from_response(self, response: str) -> Optional[List[Dict]]:
         """LLM 응답에서 JSON 배열을 추출합니다."""
@@ -508,7 +811,6 @@ def main():
 
         # 파일 스캐너 초기화
         file_processor = FileProcessor()
-        batch_processor = BatchProcessor(batch_size=200, overlap_size=10)
         sentence_composer = SentenceComposer(logger)
 
         # 입력 파일들 스캔
@@ -531,76 +833,55 @@ def main():
             with open(file_info['file_path'], 'r', encoding='utf-8') as f:
                 input_data = json.load(f)
 
-            # 배치로 분할
-            batches = batch_processor.split_into_batches(input_data)
             part_info = f"{file_info['part_number']}_{file_info['language']}"
 
-            logger.info(f"배치 분할 완료: 총 {len(batches)}개 배치 생성 (겹침: 10개)")
+            # 배치 크기 설정 (H1/H2/H3가 많아서 섹션당 P가 200개 넘지 않음)
+            batch_size = 200
+            logger.info(f"언어: {file_info['language']}, 배치 크기: {batch_size}")
 
-            # 각 배치 처리
-            all_results = []
-            successful_batches = 0
-            total_processing_time = 0
-            batch_summaries = []
+            # 섹션 기반 처리 (H1/H2/H3는 직접 추가, P만 LLM 처리)
+            final_results, metadata, all_headers = sentence_composer.process_file(
+                input_data,
+                part_info,
+                batch_size=batch_size
+            )
 
-            for batch in batches:
-                result = sentence_composer.process_batch(
-                    batch['data'],
-                    batch['batch_number'],
-                    part_info
-                )
-
-                if result['success']:
-                    all_results.extend(result['composed_data'])
-                    successful_batches += 1
-                    total_processing_time += result['processing_time']
-
-                    batch_summaries.append({
-                        "batch_number": result['batch_number'],
-                        "compression_ratio": result['compression_ratio'],
-                        "h1_preservation": result['h1_preservation_rate'],
-                        "h2_preservation": result['h2_preservation_rate']
-                    })
-                else:
-                    logger.error(f"배치 {batch['batch_number']} 실패: {result['error']}")
-
-            # 중복 제거 (text 기준) - 주석 처리됨
-            # logger.info(f"\n결과 통합 및 중복 제거...")
-            # seen_texts = set()
-            # unique_results = []
-            #
-            # for item in all_results:
-            #     text = item.get('text', '')
-            #     if text and text not in seen_texts:
-            #         seen_texts.add(text)
-            #         unique_results.append(item)
-
-            # 중복 제거 없이 전체 결과 사용
-            logger.info(f"\n결과 통합...")
-            unique_results = all_results
-
-            # 메타데이터 준비
-            metadata = {
-                "total_input_count": len(input_data),
-                "overall_compression_ratio": len(input_data) / len(unique_results) if len(unique_results) > 0 else 0,
-                "successful_batches": successful_batches,
-                "total_batches": len(batches),
-                "average_processing_time": total_processing_time / successful_batches if successful_batches > 0 else 0,
+            # 메타데이터 확장 (save_results_with_metadata에서 필요한 필드 추가)
+            extended_metadata = {
+                "total_input_count": metadata["total_input_count"],
+                "overall_compression_ratio": metadata["overall_compression_ratio"],
+                "successful_batches": 0,  # 섹션 기반 처리에서는 의미 없음
+                "total_batches": 0,  # 섹션 기반 처리에서는 의미 없음
+                "average_processing_time": 0,  # 섹션 기반 처리에서는 의미 없음
                 "processing_summary": {
-                    "total_duplicates_removed": 0,  # 중복 제거 비활성화
-                    "batch_details": batch_summaries
+                    "total_sections": metadata["total_sections"],
+                    "h1_count": metadata["h1_count"],
+                    "h2_count": metadata["h2_count"],
+                    "h3_count": metadata["h3_count"],
+                    "input_p_count": metadata["input_p_count"],
+                    "output_p_count": metadata["output_p_count"]
                 }
             }
 
             # 결과 저장 (메타데이터 포함)
             output_path = file_info['output_path']
-            save_results_with_metadata(output_path, unique_results, metadata)
+            save_results_with_metadata(output_path, final_results, extended_metadata)
 
             logger.success(f"저장 완료: {output_path}")
-            logger.info(f"   원본: {len(input_data):,}개 → 결과: {len(unique_results):,}개")
-            logger.info(f"   전체 압축률: {metadata['overall_compression_ratio']:.1f}배")
-            logger.info(f"   성공한 배치: {successful_batches}/{len(batches)}")
-            # logger.info(f"   중복 제거: {len(all_results) - len(unique_results):,}개")  # 중복 제거 비활성화
+            logger.info(f"   원본: {len(input_data):,}개 → 결과: {len(final_results):,}개")
+            logger.info(f"   P 압축률: {metadata['overall_compression_ratio']:.1f}배")
+            logger.info(f"   H1 보존: {metadata['h1_count']}개 (100%)")
+            logger.info(f"   H2 보존: {metadata['h2_count']}개 (100%)")
+            logger.info(f"   H3 보존: {metadata['h3_count']}개 (100%)")
+
+            # H1/H2/H3 anchor 파일 저장
+            anchor_filename = file_info['filename'].replace('llm_input_', 'anchors_')
+            anchor_path = str(file_processor.sentences_dir / anchor_filename)
+            with open(anchor_path, 'w', encoding='utf-8') as f:
+                json.dump(all_headers, f, ensure_ascii=False, indent=2)
+
+            logger.success(f"Anchor 파일 저장: {anchor_filename}")
+            logger.info(f"   총 {len(all_headers)}개 헤더 (H1: {metadata['h1_count']}, H2: {metadata['h2_count']}, H3: {metadata['h3_count']})")
 
         logger.success("모든 파일 처리 완료")
 
