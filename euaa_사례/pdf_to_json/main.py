@@ -16,18 +16,18 @@ import re
 
 # main.py에 추가할 함수
 def merge_consecutive_tags(tagged_texts):
-    """H1, H2는 연속된 같은 태그를 병합하고, P는 그대로 유지하되 점 반복 제거"""
+    """H1, H2, H3는 연속된 같은 태그를 병합하고, P는 그대로 유지하되 점 반복 제거"""
     if not tagged_texts:
         return []
-    
+
     merged = []
     current_tag = None
     current_texts = []
-    
+
     for item in tagged_texts:
         # P 태그는 별도 병합 없이 그대로 처리
         if item["tag"] == "P":
-            # 이전에 누적된 H1/H2 텍스트가 있으면 먼저 병합
+            # 이전에 누적된 H1/H2/H3 텍스트가 있으면 먼저 병합
             if current_texts:
                 merged_text = " ".join(current_texts)
                 merged_text = re.sub(r'\.{5,}', '', merged_text)
@@ -36,7 +36,7 @@ def merge_consecutive_tags(tagged_texts):
                     "text": merged_text
                 })
                 current_texts = []
-            
+
             # P 태그는 점 반복만 제거하고 그대로 추가
             cleaned_text = re.sub(r'\.{5,}', '', item["text"])
             merged.append({
@@ -44,9 +44,9 @@ def merge_consecutive_tags(tagged_texts):
                 "text": cleaned_text
             })
             current_tag = None  # P 태그 후에는 누적 상태 초기화
-            
-        # H1, H2 태그는 연속된 같은 태그를 병합
-        elif item["tag"] in ["H1", "H2"]:
+
+        # H1, H2, H3 태그는 연속된 같은 태그를 병합
+        elif item["tag"] in ["H1", "H2", "H3"]:
             if item["tag"] == current_tag:
                 # 같은 태그면 텍스트를 누적
                 current_texts.append(item["text"])
@@ -61,8 +61,8 @@ def merge_consecutive_tags(tagged_texts):
                     })
                 current_tag = item["tag"]
                 current_texts = [item["text"]]
-    
-    # 마지막에 누적된 H1/H2 텍스트들 처리
+
+    # 마지막에 누적된 H1/H2/H3 텍스트들 처리
     if current_texts:
         merged_text = " ".join(current_texts)
         merged_text = re.sub(r'\.{5,}', '', merged_text)
@@ -70,7 +70,7 @@ def merge_consecutive_tags(tagged_texts):
             "tag": current_tag,
             "text": merged_text
         })
-    
+
     return merged
 
 def main():
@@ -122,8 +122,15 @@ def main():
     # (이 파일을 복사해서 LLM 프롬프트에 붙여넣으면 됩니다.)
     llm_input_path = f"llm_input_{config.get_file_suffix()}.json"
     with open(llm_input_path, 'w', encoding='utf-8') as f:
-        # LLM에게는 tag와 text 정보만 필요
-        llm_input_data = [{"text": item["text"], "source_type": item["tag"]} for item in merged_texts]
+        # LLM에게 전달할 데이터에 순차 ID 부여
+        llm_input_data = [
+            {
+                "id": idx + 1,
+                "text": item["text"],
+                "source_type": item["tag"]
+            }
+            for idx, item in enumerate(merged_texts)
+        ]
         json.dump(llm_input_data, f, ensure_ascii=False, indent=2)
 
     print(f"\n✅ LLM 입력 파일 생성 완료! '{llm_input_path}'의 내용을 복사하여 다음 단계의 LLM 프롬프트에 사용하세요.")
